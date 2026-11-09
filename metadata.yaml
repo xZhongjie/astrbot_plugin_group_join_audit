@@ -2,7 +2,7 @@ name: astrbot_plugin_group_join_audit
 display_name: 入群审核
 desc: 使用 AstrBot 的 LLM 自动审核 QQ 入群申请。群主/管理员在群里用 /设置入群审核、/问题、/参考答案 配置，申请人验证信息交给模型判断并自动同意或拒绝。
 short_desc: LLM 自动审核入群申请，群里指令即可配置
-version: v1.0.0
+version: v1.0.1
 author: xZhongjie
 repo: https://github.com/xZhongjie/astrbot_plugin_group_join_audit
 astrbot_version: ">=4.10.4"

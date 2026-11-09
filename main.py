@@ -26,7 +26,7 @@ from astrbot.api.event.filter import EventMessageType, event_message_type
 from astrbot.api.star import Context, Star, StarTools
 
 PLUGIN_NAME = "astrbot_plugin_group_join_audit"
-PLUGIN_VERSION = "v1.0.0"
+PLUGIN_VERSION = "v1.0.1"
 SEEN_TTL = 600
 
 
@@ -58,17 +58,24 @@ def _raw_dict(raw: Any) -> dict[str, Any]:
     return result
 
 
-def _extract_args(event: AstrMessageEvent, command: str) -> str:
+def _extract_args(
+    event: AstrMessageEvent, command: str | tuple[str, ...]
+) -> str:
+    names = (command,) if isinstance(command, str) else command
     text = (event.message_str or "").strip()
     if not text:
         return ""
-    if text == command:
-        return ""
-    if text.startswith(command + " "):
-        return text[len(command) + 1 :].strip()
-    if text.startswith(command + "\u3000"):
-        return text[len(command) + 1 :].strip()
-    match = re.search(rf"(?:^|\s){re.escape(command)}(?:\s+|$)", text)
+    for name in sorted(names, key=len, reverse=True):
+        if text == name:
+            return ""
+        if text.startswith(name + " "):
+            return text[len(name) + 1 :].strip()
+        if text.startswith(name + "\u3000"):
+            return text[len(name) + 1 :].strip()
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(names, key=len, reverse=True)
+    )
+    match = re.search(rf"(?:^|\s)(?:{alternatives})(?:\s+|$)", text)
     if match:
         return text[match.end() :].strip()
     return ""
@@ -111,6 +118,7 @@ class GroupJoinAuditPlugin(Star):
         cfg.setdefault("enabled", False)
         cfg.setdefault("question", "")
         cfg.setdefault("reference", "")
+        cfg.setdefault("reject_reason", "")
         return cfg
 
     # ------------------------------------------------------------------
@@ -166,10 +174,12 @@ class GroupJoinAuditPlugin(Star):
             "✅ 已开启入群审核。",
             f"当前问题：{cfg['question'] or '（未设置）'}",
             f"参考答案：{cfg['reference'] or '（未设置，由 LLM 自行判断）'}",
+            f"拒绝回复：{cfg['reject_reason'] or '（未设置，使用 LLM 给的理由）'}",
             "",
             "设置步骤：",
             "1. /问题 你的问题",
             "2. /参考答案 参考答案（可选，不设置就完全由 LLM 判断）",
+            "3. /拒绝回复 请正确回答入群问题（可选，拒绝时展示给申请人）",
             "设置完成后，新的入群申请会自动审核。",
         ]
         yield event.plain_result("\n".join(lines))
@@ -234,6 +244,40 @@ class GroupJoinAuditPlugin(Star):
         yield event.plain_result(f"✅ 已设置参考答案：\n{cfg['reference']}")
         event.stop_event()
 
+    @filter.command("拒绝回复", alias={"拒绝提示"})
+    async def cmd_reject_reason(self, event: AstrMessageEvent):
+        group_id = str(event.get_group_id() or "")
+        if not group_id:
+            yield event.plain_result("请在群里使用这个指令。")
+            return
+        if not await self._is_group_admin(event, group_id):
+            yield event.plain_result("只有群主或管理员可以设置拒绝回复。")
+            return
+        args = _extract_args(event, ("拒绝回复", "拒绝提示"))
+        cfg = self._group_cfg(group_id)
+        if not args:
+            yield event.plain_result(
+                "当前拒绝回复："
+                f"{cfg['reject_reason'] or '（未设置，使用 LLM 给的理由）'}\n"
+                "用法：/拒绝回复 请正确回答入群问题\n"
+                "清除：/拒绝回复 清除"
+            )
+            event.stop_event()
+            return
+        if args in {"清除", "删除", "无", "默认"}:
+            cfg["reject_reason"] = ""
+            self._save()
+            yield event.plain_result("✅ 已清除拒绝回复，拒绝时使用 LLM 给出的理由。")
+            event.stop_event()
+            return
+        cfg["reject_reason"] = args[:100]
+        self._save()
+        yield event.plain_result(
+            f"✅ 已设置拒绝回复：\n{cfg['reject_reason']}\n\n"
+            "之后拒绝入群申请时会使用这句话。"
+        )
+        event.stop_event()
+
     @filter.command("关闭入群审核")
     async def cmd_disable(self, event: AstrMessageEvent):
         group_id = str(event.get_group_id() or "")
@@ -263,6 +307,7 @@ class GroupJoinAuditPlugin(Star):
                     f"开关：{'已开启' if cfg.get('enabled') else '已关闭'}",
                     f"问题：{cfg.get('question') or '（未设置）'}",
                     f"参考答案：{cfg.get('reference') or '（未设置，LLM 自行判断）'}",
+                    f"拒绝回复：{cfg.get('reject_reason') or '（未设置，使用 LLM 理由）'}",
                     f"模型：{self._provider_id() or '使用当前会话模型'}",
                 ]
             )
@@ -308,6 +353,10 @@ class GroupJoinAuditPlugin(Star):
             )
             return
         approve, reason = decision
+        if not approve:
+            fixed_reason = str(cfg.get("reject_reason") or "").strip()
+            if fixed_reason:
+                reason = fixed_reason
         await self._answer_request(event, flag, approve, reason)
         logger.info(
             "[入群审核] 群 %s 用户 %s：%s（%s）",
