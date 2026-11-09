@@ -26,7 +26,7 @@ from astrbot.api.event.filter import EventMessageType, event_message_type
 from astrbot.api.star import Context, Star, StarTools
 
 PLUGIN_NAME = "astrbot_plugin_group_join_audit"
-PLUGIN_VERSION = "v1.0.1"
+PLUGIN_VERSION = "v1.0.2"
 SEEN_TTL = 600
 
 
@@ -93,7 +93,12 @@ class GroupJoinAuditPlugin(Star):
         self.store_path = self.data_dir / "groups.json"
         self.groups: dict[str, dict[str, Any]] = _safe_json_load(self.store_path)
         self._seen: dict[str, float] = {}
-        logger.info("入群审核插件 %s 已加载", PLUGIN_VERSION)
+        logger.info(
+            "入群审核插件 %s 已加载，配置：%s，已有群配置：%d 个",
+            PLUGIN_VERSION,
+            self.store_path,
+            len(self.groups),
+        )
 
     async def terminate(self):
         pass
@@ -125,12 +130,18 @@ class GroupJoinAuditPlugin(Star):
     # 权限
     # ------------------------------------------------------------------
     async def _is_group_admin(self, event: AstrMessageEvent, group_id: str) -> bool:
+        user_id = str(event.get_sender_id() or "")
+        logger.info(
+            "[入群审核] 权限检查 group=%s user=%s platform=%s",
+            group_id,
+            user_id,
+            event.get_platform_name(),
+        )
         try:
             if event.is_admin():
                 return True
         except Exception:  # noqa: BLE001
             pass
-        user_id = str(event.get_sender_id() or "")
         try:
             admins = self.context.get_config().get("admins_id", [])
             if str(user_id) in {str(item) for item in admins}:
@@ -150,6 +161,7 @@ class GroupJoinAuditPlugin(Star):
                     no_cache=True,
                 )
                 role = str(info.get("role") or "").lower() if isinstance(info, dict) else ""
+                logger.info("[入群审核] 群角色查询结果：%s", role)
                 return role in {"owner", "admin"}
             except Exception:  # noqa: BLE001
                 return False
@@ -160,6 +172,7 @@ class GroupJoinAuditPlugin(Star):
     # ------------------------------------------------------------------
     @filter.command("设置入群审核", alias={"开启入群审核"})
     async def cmd_enable(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到指令：%s", event.message_str)
         group_id = str(event.get_group_id() or "")
         if not group_id:
             yield event.plain_result("请在群里使用这个指令。")
@@ -187,6 +200,7 @@ class GroupJoinAuditPlugin(Star):
 
     @filter.command("问题")
     async def cmd_question(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到指令：%s", event.message_str)
         group_id = str(event.get_group_id() or "")
         if not group_id:
             yield event.plain_result("请在群里使用这个指令。")
@@ -215,6 +229,7 @@ class GroupJoinAuditPlugin(Star):
 
     @filter.command("参考答案")
     async def cmd_reference(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到指令：%s", event.message_str)
         group_id = str(event.get_group_id() or "")
         if not group_id:
             yield event.plain_result("请在群里使用这个指令。")
@@ -246,6 +261,7 @@ class GroupJoinAuditPlugin(Star):
 
     @filter.command("拒绝回复", alias={"拒绝提示"})
     async def cmd_reject_reason(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到指令：%s", event.message_str)
         group_id = str(event.get_group_id() or "")
         if not group_id:
             yield event.plain_result("请在群里使用这个指令。")
@@ -280,6 +296,7 @@ class GroupJoinAuditPlugin(Star):
 
     @filter.command("关闭入群审核")
     async def cmd_disable(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到指令：%s", event.message_str)
         group_id = str(event.get_group_id() or "")
         if not group_id:
             yield event.plain_result("请在群里使用这个指令。")
@@ -295,6 +312,7 @@ class GroupJoinAuditPlugin(Star):
 
     @filter.command("入群审核状态", alias={"审核状态"})
     async def cmd_status(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到指令：%s", event.message_str)
         group_id = str(event.get_group_id() or "")
         if not group_id:
             yield event.plain_result("请在群里使用这个指令。")
@@ -314,18 +332,54 @@ class GroupJoinAuditPlugin(Star):
         )
         event.stop_event()
 
+    @filter.command("入群审核诊断", alias={"审核诊断"})
+    async def cmd_diagnostics(self, event: AstrMessageEvent):
+        logger.info("[入群审核] 收到诊断指令：%s", event.message_str)
+        group_id = str(event.get_group_id() or "")
+        if not group_id:
+            yield event.plain_result("请在群里使用这个指令。")
+            return
+        cfg = self._group_cfg(group_id)
+        is_admin = await self._is_group_admin(event, group_id)
+        yield event.plain_result(
+            "\n".join(
+                [
+                    f"🧪 入群审核诊断 {PLUGIN_VERSION}",
+                    f"平台：{event.get_platform_name()}",
+                    f"群号：{group_id}",
+                    f"你是群管理员：{is_admin}",
+                    f"开关：{cfg.get('enabled')}",
+                    f"问题：{cfg.get('question') or '（空）'}",
+                    f"参考答案：{cfg.get('reference') or '（空）'}",
+                    f"拒绝回复：{cfg.get('reject_reason') or '（空）'}",
+                    f"审核模型：{self._provider_id() or '（无）'}",
+                    f"配置文件：{self.store_path}",
+                ]
+            )
+        )
+        event.stop_event()
+
     # ------------------------------------------------------------------
     # 入群申请
     # ------------------------------------------------------------------
     @event_message_type(EventMessageType.GROUP_MESSAGE, priority=999)
     async def on_group_request(self, event: AstrMessageEvent):
-        if event.get_platform_name() != "aiocqhttp":
-            return
-        raw = getattr(event.message_obj, "raw_message", None)
-        raw = _raw_dict(raw)
+        raw = _raw_dict(getattr(event.message_obj, "raw_message", None))
         if not raw:
             return
-        if raw.get("post_type") != "request" or raw.get("request_type") != "group":
+        if raw.get("post_type") != "request":
+            return
+        logger.info(
+            "[入群审核] 收到 request：platform=%s group=%s user=%s sub=%s comment=%s",
+            event.get_platform_name(),
+            raw.get("group_id"),
+            raw.get("user_id"),
+            raw.get("sub_type"),
+            str(raw.get("comment") or "")[:200],
+        )
+        if event.get_platform_name() != "aiocqhttp":
+            return
+        if raw.get("request_type") != "group":
             return
         if raw.get("sub_type") not in (None, "add"):
             return
@@ -334,13 +388,21 @@ class GroupJoinAuditPlugin(Star):
         user_id = str(raw.get("user_id") or "")
         flag = str(raw.get("flag") or "")
         if not group_id or not user_id or not flag:
+            logger.warning("[入群审核] 请求字段缺失：%s", raw)
             return
         event.stop_event()
 
         cfg = self._group_cfg(group_id)
         if not cfg.get("enabled") or not cfg.get("question"):
+            logger.info(
+                "[入群审核] 群 %s 未开启或未设置问题，忽略（enabled=%s question=%s）",
+                group_id,
+                cfg.get("enabled"),
+                bool(cfg.get("question")),
+            )
             return
         if self._seen_flag(flag):
+            logger.info("[入群审核] 重复请求 flag=%s，忽略", flag)
             return
 
         comment = str(raw.get("comment") or "").strip()[:800]
@@ -384,6 +446,14 @@ class GroupJoinAuditPlugin(Star):
         if not provider_id:
             logger.warning("[入群审核] 没有可用的聊天模型")
             return None
+        logger.info(
+            "[入群审核] 使用模型 %s 审核群 %s，问题=%r，参考答案=%r，验证信息=%r",
+            provider_id,
+            group_id,
+            cfg.get("question"),
+            cfg.get("reference"),
+            comment[:200],
+        )
 
         reference = str(cfg.get("reference") or "").strip()
         reference_text = reference or "（未设置参考答案，请根据问题自行判断）"
@@ -418,6 +488,7 @@ class GroupJoinAuditPlugin(Star):
             return None
 
         text = str(getattr(response, "completion_text", "") or "").strip()
+        logger.info("[入群审核] 模型返回：%s", text[:500])
         return self._parse_decision(text)
 
     def _provider_id(self) -> str:
@@ -480,6 +551,12 @@ class GroupJoinAuditPlugin(Star):
         if not callable(caller):
             logger.error("[入群审核] 无法调用协议端 API")
             return
+        logger.info(
+            "[入群审核] set_group_add_request flag=%s approve=%s reason=%s",
+            flag,
+            approve,
+            reason,
+        )
         try:
             await caller(
                 "set_group_add_request",
@@ -488,5 +565,9 @@ class GroupJoinAuditPlugin(Star):
                 approve=approve,
                 reason="" if approve else (reason or "未通过入群审核")[:100],
             )
+            logger.info("[入群审核] set_group_add_request 调用成功")
         except Exception:  # noqa: BLE001
             logger.exception("[入群审核] 处理入群申请失败")
+
+
+
